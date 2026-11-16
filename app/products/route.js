@@ -1,129 +1,187 @@
-import { Pool } from 'pg';
-import { v4 } from 'uuid';
+import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../lib/auth-options";
+import { query } from "../../lib/db";
 
-const pool = new Pool({
-  host: '127.0.0.1',
-  port: 5433,
-  user: 'b2b_user',
-  password: 'devpass123',
-  database: 'b2b_platform',
-});
+export const dynamic = "force-dynamic";
 
-// GET - List products for the authenticated user's tenant
-export default async function handler(request, response) {
+const VALID_STATUSES = ["ACTIVE", "ARCHIVED"];
+
+export async function GET() {
   try {
-    const tenantId = request.query.tenantId || 'tenant_1';
-    
-    const result = await pool.query(
-      `SELECT id, name, "sku", "fabricmaterial", "brand", "productstatus", "createdat" 
-       FROM "Product" 
-       WHERE "businessId" IN (
-         SELECT "businessId" FROM "WholesalerProfile" 
-         WHERE id IN (
-           SELECT "ownerId" FROM "Tenant" WHERE id = \$1
-         )
-       )
-       ORDER BY "createdat" DESC`,
-      [tenantId]
+    const result = await query(
+      `SELECT p.id, p.name, p.sku, p.brand, p.description, p.fabricmaterial,
+              p.productstatus, p.createdat, b.name AS "businessName"
+       FROM "Product" p
+       JOIN "Business" b ON b.id = p."businessId"
+       WHERE p.productstatus = 'ACTIVE'
+       ORDER BY p.createdat DESC NULLS LAST
+       LIMIT 100`
     );
-    
-    response.status(200).json({
+
+    return NextResponse.json({
       success: true,
       products: result.rows,
-      count: result.rows.length
+      count: result.rows.length,
     });
   } catch (error) {
-    console.error('Get products error:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Failed to fetch products'
-    });
+    console.error("Get products error:", error);
+    return NextResponse.json(
+      { success: false, error: "Failed to fetch products" },
+      { status: 500 }
+    );
   }
 }
 
-// POST - Create a new product
-export async function POST(request, response) {
+export async function POST(request) {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const businessId = session.user.businessId;
+
+  if (!businessId) {
+    return NextResponse.json(
+      { error: "No business is linked to this account" },
+      { status: 400 }
+    );
+  }
+
   try {
     const body = await request.json();
-    const {
-      name,
-      sku,
-      brand,
-      fabricMaterial,
-      description,
-      basePrice,
-      minOrderQuantity,
-      productStatus,
-    } = body;
+    const { name, sku, brand, fabricMaterial, description } = body;
+    const productStatus = body.productStatus || "ACTIVE";
 
-    const tenantId = request.cookies?.tenantId || 'tenant_1';
-    const userId = request.cookies?.userId || '8f29132c-94df-4901-9ee1-c74e36a38103';
-    const businessId = request.cookies?.businessId || 'biz-demo';
-    
-    const productId = v4();
-    
-    await pool.query(
-      `INSERT INTO "Product" ("id", "businessId", "name", "slug", "sku", "description", "brand", "fabricmaterial", "productstatus", "createdat", "updatedat")
-       VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, NOW(), NOW())`,
-      [productId, businessId, name, name.toLowerCase().replace(/[^\w]+/g, '-').substring(0, 50), sku, description, brand, fabricMaterial, productStatus || 'active']
+    if (!name || typeof name !== "string") {
+      return NextResponse.json(
+        { error: "Product name is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!VALID_STATUSES.includes(productStatus)) {
+      return NextResponse.json(
+        { error: "Invalid product status" },
+        { status: 400 }
+      );
+    }
+
+    const productId = randomUUID();
+    const slug = name
+      .toLowerCase()
+      .replace(/[^\w]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .substring(0, 50);
+
+    await query(
+      `INSERT INTO "Product"
+         ("id", "businessId", name, slug, sku, description, brand, fabricmaterial, productstatus, createdat, updatedat)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
+      [
+        productId,
+        businessId,
+        name,
+        slug,
+        sku || null,
+        description || null,
+        brand || null,
+        fabricMaterial || null,
+        productStatus,
+      ]
     );
-    
-    response.status(201).json({
-      success: true,
-      message: 'Product created successfully',
-      productId
-    });
+
+    return NextResponse.json(
+      { success: true, message: "Product created successfully", productId },
+      { status: 201 }
+    );
   } catch (error) {
-    console.error('Create product error:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Failed to create product'
-    });
+    console.error("Create product error:", error);
+    return NextResponse.json(
+      { success: false, error: "Failed to create product" },
+      { status: 500 }
+    );
   }
 }
 
-// PUT - Update product status
-export async function PUT(request, response) {
+export async function PUT(request) {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id || !session.user.businessId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const { productId, productStatus } = await request.json();
-    
-    await pool.query(
-      `UPDATE "Product" SET "productstatus" = \$1, "updatedat" = NOW() WHERE id = \$2`,
-      [productStatus, productId]
+
+    if (!productId || !VALID_STATUSES.includes(productStatus)) {
+      return NextResponse.json(
+        { error: "A valid productId and status are required" },
+        { status: 400 }
+      );
+    }
+
+    const result = await query(
+      `UPDATE "Product"
+       SET productstatus = $1, updatedat = NOW()
+       WHERE id = $2 AND "businessId" = $3`,
+      [productStatus, productId, session.user.businessId]
     );
-    
-    response.status(200).json({
+
+    if (result.rowCount === 0) {
+      return NextResponse.json({ error: "Product not found" }, { status: 404 });
+    }
+
+    return NextResponse.json({
       success: true,
-      message: 'Product updated successfully'
+      message: "Product updated successfully",
     });
   } catch (error) {
-    console.error('Update product error:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Failed to update product'
-    });
+    console.error("Update product error:", error);
+    return NextResponse.json(
+      { success: false, error: "Failed to update product" },
+      { status: 500 }
+    );
   }
 }
 
-// DELETE - Delete product
-export async function DELETE(request, response) {
+export async function DELETE(request) {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id || !session.user.businessId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const { productId } = await request.json();
-    
-    await pool.query(
-      `DELETE FROM "Product" WHERE id = \$1`,
-      [productId]
+
+    if (!productId) {
+      return NextResponse.json(
+        { error: "productId is required" },
+        { status: 400 }
+      );
+    }
+
+    const result = await query(
+      `DELETE FROM "Product" WHERE id = $1 AND "businessId" = $2`,
+      [productId, session.user.businessId]
     );
-    
-    response.status(200).json({
+
+    if (result.rowCount === 0) {
+      return NextResponse.json({ error: "Product not found" }, { status: 404 });
+    }
+
+    return NextResponse.json({
       success: true,
-      message: 'Product deleted successfully'
+      message: "Product deleted successfully",
     });
   } catch (error) {
-    console.error('Delete product error:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Failed to delete product'
-    });
+    console.error("Delete product error:", error);
+    return NextResponse.json(
+      { success: false, error: "Failed to delete product" },
+      { status: 500 }
+    );
   }
 }

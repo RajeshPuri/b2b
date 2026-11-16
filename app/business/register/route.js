@@ -1,22 +1,23 @@
-import { Pool } from 'pg';
-import { v4 } from 'uuid';
+import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
+import { getServerSession } from "next-auth";
+import { authOptions } from "../../../lib/auth-options";
+import { pool } from "../../../lib/db";
 
-const pool = new Pool({
-  host: '127.0.0.1',
-  port: 5433,
-  user: 'b2b_user',
-  password: 'devpass123',
-  database: 'b2b_platform',
-});
+export const dynamic = "force-dynamic";
 
-export const config = {
-  api: {
-    bodyParser: true,
-  },
-};
+const BUSINESS_TYPES = ["WHOLESALER", "CLIENT"];
 
-export default async function handler(request, response) {
+export async function POST(request) {
+  const session = await getServerSession(authOptions);
+  const userId = session?.user?.id;
+
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
+    const body = await request.json();
     const {
       businessName,
       businessType,
@@ -28,55 +29,108 @@ export default async function handler(request, response) {
       ifscCode,
       approvedLimit,
       country,
-    } = request.body;
+    } = body;
 
-    const userId = request.cookies?.userId || '8f29132c-94df-4901-9ee1-c74e36a38103'; // MVP: use known user
+    if (!businessName || !BUSINESS_TYPES.includes(businessType)) {
+      return NextResponse.json(
+        { error: "businessName and a valid businessType are required" },
+        { status: 400 }
+      );
+    }
 
-    // Create Business record
-    const businessId = uuidv4();
-    const businessVerificationStatus = 'pending';
-    
-    await pool.query(
-      `INSERT INTO "Business" ("id", name, "type", "verificationStatus", "currency", "country", "status", "createdat", "updatedat")
-       VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, NOW(), NOW())`,
-      [businessId, businessName, businessType, businessVerificationStatus, country || 'US', country || 'US', 'active']
-    );
+    const client = await pool.connect();
 
-    // Create WholesalerProfile record
-    const wholesalerId = uuidv4();
-    await pool.query(
-      `INSERT INTO "WholesalerProfile" ("id", "businessId", "cinnumber", "pannumber", "bankaccountname", "bankaccountnumber", "bankname", "bankname", "ifsccode", "approvedlimit", "createdat", "updatedat")
-       VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, NOW(), NOW())`,
-      [wholesalerId, businessId, cinNumber, panNumber, bankAccountName, bankAccountNumber, bankName, ifscCode, parseFloat(approvedLimit)]
-    );
+    try {
+      await client.query("BEGIN");
 
-    // Create Tenant record linking user to business
-    await pool.query(
-      `INSERT INTO "Tenant" (id, name, ownerId, plan, status)
-       VALUES (\$1, \$2, \$3, \$4, \$5)`,
-      [`tenant_${Date.now()}`, businessName, userId, 'free', 'active']
-    );
+      const businessId = randomUUID();
+      const tenantId = `tenant_${Date.now()}`;
 
-    // Update user status to verified
-    await pool.query(
-      `UPDATE "User" SET status = 'verified' WHERE id = \$1`,
-      [userId]
-    );
+      await client.query(
+        `INSERT INTO "Business"
+           (id, name, type, "verificationStatus", currency, country, status, createdat, updatedat)
+         VALUES ($1, $2, $3, 'PENDING_VERIFICATION', 'NPR', $4, 'ACTIVE', NOW(), NOW())`,
+        [businessId, businessName, businessType, country || "NP"]
+      );
 
-    response.status(201).json({
-      success: true,
-      message: 'Business registration submitted successfully',
-      businessId,
-      wholesalerId,
-      status: 'pending_verification'
-    });
+      if (businessType === "WHOLESALER") {
+        await client.query(
+          `INSERT INTO "WholesalerProfile"
+             (id, "businessId", cinnumber, pannumber, bankaccountname, bankaccountnumber,
+              bankname, ifsccode, approvedlimit, createdat, updatedat)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
+          [
+            randomUUID(),
+            businessId,
+            cinNumber || null,
+            panNumber || null,
+            bankAccountName || null,
+            bankAccountNumber || null,
+            bankName || null,
+            ifscCode || null,
+            Number.parseFloat(approvedLimit) || 0,
+          ]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO "ClientProfile"
+             (id, "businessId", companygstnumber, pannumber, contactpersonname,
+              creditlimit, paymentterms, createdat, updatedat)
+           VALUES ($1, $2, $3, $4, $5, 0, 'NET_30', NOW(), NOW())`,
+          [
+            randomUUID(),
+            businessId,
+            cinNumber || null,
+            panNumber || null,
+            session.user.name || null,
+          ]
+        );
+      }
 
+      await client.query(
+        `INSERT INTO "BusinessMembership"
+           (id, "userId", "businessId", role, status, "joinedAt")
+         VALUES ($1, $2, $3, 'OWNER', 'ACTIVE', NOW())`,
+        [randomUUID(), userId, businessId]
+      );
+
+      await client.query(
+        `INSERT INTO "Tenant" (id, name, ownerid, plan, status)
+         VALUES ($1, $2, $3, 'free', 'active')`,
+        [tenantId, businessName, userId]
+      );
+
+      await client.query(
+        `UPDATE "User" SET status = 'ACTIVE', "updatedAt" = NOW() WHERE id = $1`,
+        [userId]
+      );
+
+      await client.query("COMMIT");
+
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Business registration submitted successfully",
+          businessId,
+          status: "PENDING_VERIFICATION",
+        },
+        { status: 201 }
+      );
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    console.error('Business registration error:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Failed to submit business registration',
-      details: error.message
-    });
+    console.error("Business registration error:", error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to submit business registration",
+        details: error.message,
+      },
+      { status: 500 }
+    );
   }
 }

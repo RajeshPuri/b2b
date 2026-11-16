@@ -3,7 +3,7 @@
 **Date:** 2026-11-16
 **Project root:** `/home/meroworth/mycode/B2B`
 **Environment:** Development (local container)
-**Status:** Working demo — 4 public pages, 2 role dashboards, credentials auth, seeded database, production build passing.
+**Status:** Deployment-ready demo — 4 public pages, 2 role dashboards, credentials auth, seeded database, cloud database setup scripts, production build passing, Vercel configuration prepared.
 
 ---
 
@@ -36,7 +36,7 @@ payments, and several APIs still need implementation (see Known Limitations and 
 | Language | TypeScript + JavaScript | Pages in TSX; API routes and lib in JS (CommonJS for `lib/auth.js`) |
 | Styling | Hand-written CSS design system | Tailwind is not installed; see Section 8 |
 | Database | PostgreSQL 15.20 | `127.0.0.1:5433`, database `b2b_platform` |
-| DB access | `pg` (node-postgres) | Prisma client generation is not functional in this environment |
+| DB access | `pg` (node-postgres) | Prisma packages removed; `pg` is the only runtime DB layer |
 | Auth | NextAuth v4 (Credentials provider) | JWT session strategy; custom role claims |
 | Passwords | bcryptjs | Hashes stored in `User.passwordHash` |
 | Runtime env | Linux container | Node 26 types; dev server on port 3000 |
@@ -51,9 +51,9 @@ Password: devpass123
 Database: b2b_platform
 ```
 
-Note: `.env.local` / `.env.development` currently declare port **5432**, while the application
-code and actual database use **5433**. The hardcoded pools in `lib/auth.js` and `lib/db.js`
-use 5433, which is why authentication works. The env mismatch should be corrected.
+Note: local `.env.local` / `.env.development` and `.env.example` now use port **5433**.
+Application pools read `DATABASE_URL` (with a localhost fallback) and enable SSL automatically
+for non-local hosts, so the same code works locally and on Vercel/Neon/Supabase.
 
 ---
 
@@ -149,7 +149,7 @@ B2B/
 │   ├── api/auth/[...nextauth]/route.js     NextAuth App Router handler (GET/POST)
 │   ├── auth/login/page.tsx                 Login page (server component + LoginForm)
 │   ├── auth/register/page.tsx              Buyer registration page (visual)
-│   ├── business/register/route.js          Business registration API (known issues)
+│   ├── business/register/route.js          Business registration API (session required)
 │   ├── components/
 │   │   ├── site-header.tsx                 Marketing header/nav/search
 │   │   ├── site-footer.tsx                 Marketing footer
@@ -159,7 +159,7 @@ B2B/
 │   ├── dashboard/client/page.tsx           Client dashboard (guarded)
 │   ├── dashboard/wholesaler/page.tsx       Wholesaler dashboard (guarded)
 │   ├── products/new/page.tsx               Supplier product form (visual)
-│   ├── products/route.js                   Product CRUD API
+│   ├── products/route.js                   Product API (public GET, guarded writes)
 │   ├── globals.css                         Complete design system (~2,650 lines)
 │   ├── layout.tsx                          Root layout, global CSS import
 │   └── page.tsx                            Marketing homepage
@@ -170,13 +170,15 @@ B2B/
 ├── middleware/
 │   ├── tenant.js                           Tenant resolution helpers (not mounted)
 │   └── api-protect.js                      JWT API protection helpers (not mounted)
-├── prisma/schema.prisma                    Reference data model (CLI not working)
+├── prisma/schema.prisma                    Reference data model (not used at runtime)
+├── db/schema.sql                           Cloud database schema (25 tables, 9 enums)
+├── setup-cloud-db.js                       Applies db/schema.sql to DATABASE_URL
 ├── docs/planning/                          18 planning documents
 ├── docs/report/PROJECT-REPORT.md           This report
 ├── seed-data.js                            Original category/business seed attempt
 ├── seed-demo-accounts.js                   Demo users/businesses/products seeder
 ├── next.config.js                          reactStrictMode only
-└── package.json                            Scripts: dev, build, start, seed, seed:demo
+└── package.json                            Scripts: dev, build, start, seed, seed:demo, db:cloud
 ```
 
 ---
@@ -224,8 +226,8 @@ Products (Atelier North Studio):
 - `Business.id`, `User.id`, `Product.id` are UUID; textual mock IDs such as `'biz-demo'` are rejected.
 - `Tenant` is a manually created table using `ownerid` (not `userId`).
 - `User` has no role column; roles come from `BusinessMembership.role` and business type from `Business.type`.
-- Prisma schema and live DB have drifted (e.g., enum casing `ACTIVE` vs stored `active`), so on this
-  machine the Prisma CLI is effectively unusable; raw `pg` queries are the source of truth.
+- Prisma is reference-only: the schema has drifted (e.g., enum casing `ACTIVE` vs stored `active`),
+  and all Prisma packages were removed from dependencies. Raw `pg` queries are the source of truth.
 - Avoid passing JavaScript `Date` values as parameters to `pg` in this environment; a timezone
   config error (`gmt+0545` not recognized) occurs. Use SQL `NOW()` instead.
 
@@ -330,8 +332,8 @@ workaround; see Section 10).
 | Endpoint | Methods | Status | Notes |
 |---|---|---|---|
 | `/api/auth/*` | NextAuth | Working | Credentials sign-in, session, CSRF; proper GET/POST exports |
-| `/products` | GET, POST, PUT, DELETE | Partial | CRUD implemented; tenant/business fallbacks hardcoded, no session enforcement |
-| `/business/register` | POST (intended) | Broken | App Router incompatibility and code bugs; see Known Limitations |
+| `/products` | GET, POST, PUT, DELETE | Working | Public active-product GET; writes require a session and are scoped to the session business |
+| `/business/register` | POST | Working | Session required; creates business, profile, membership, and tenant in one transaction |
 
 Helper middleware (`middleware/tenant.js`, `middleware/api-protect.js`) exists but is not wired to
 a root `middleware.ts` or used by routes. `api-protect.js` requires `jsonwebtoken` (installed).
@@ -346,11 +348,11 @@ a root `middleware.ts` or used by routes. `api-protect.js` requires `jsonwebtoke
 | Login accepted any password | `verifyUser` MVP stub | Seed bcrypt hashes; compare with bcrypt; plaintext fallback retained |
 | Login page form did nothing | Static server component, no handler | Added client `LoginForm` using `signIn`/`getSession` and router redirect |
 | Turbopack "Unterminated block comment" / parse errors | Turbopack mis-parsing `{/* */}` JSX comments and invalid JS | Removed JSX comments; avoided `as string` casts in `.js`; used `import { v4 }` |
-| `export const config` in route.js caused parse error | Not valid App Router config syntax | Removed config exports (still present in `business/register` route) |
+| `export const config` in route.js caused parse error | Not valid App Router config syntax | Removed all `export const config` blocks |
 | Page and API route at same segment conflicted | App Router cannot have `page.tsx` and `route.js` together | Removed conflicting pages |
 | CSS import "Module not found" | CSS import/file state issues | Moved design system to `app/globals.css`; import from root layout |
 | `metadata` export error | Exporting metadata from a client component | Kept pages as server components; client logic extracted into components |
-| Prisma CLI broken | Environment/generated client issues | All app DB access uses `pg`; Prisma schema kept as reference |
+| Prisma CLI broken | Environment/generated client issues | Removed unused Prisma packages; all app DB access uses `pg` |
 | `next build` failed type check | Dead `tailwind.config.ts` and `prisma.config.ts` referenced missing packages | Deleted both dead config files |
 | CSS utility classes had no effect | Tailwind not installed | Replaced utility markup with the custom CSS design system |
 | Seeding failed on UUID/timezone/columns | `'biz-demo'` is not a UUID; mixed-case columns; JS Date timezone error | Used real UUIDs, exact quoted column names, SQL `NOW()` |
@@ -453,51 +455,39 @@ Dashboard content checks:
 
 ## 13. Known Limitations and Risks
 
-1. **Registration is not functional.** `/auth/register` and `/products/new` are visual forms with no handlers.
-2. **`/business/register` API is broken.** It uses a Pages Router `(request, response)` handler in an App
-   Router route, calls undefined `uuidv4` (imports `v4`), and its `WholesalerProfile` insert lists
-   `bankname` twice. It needs a rewrite as a proper `POST` handler with validation.
-3. **Products API is unguarded.** `/products` does not check the session and hardcodes fallback
-   tenant/business values.
-4. **No order, quote, invoice, or payment flows.** Dashboards intentionally show empty states.
-5. **Homepage featured content is static marketing data**, not driven by the database.
-6. **Admin experience is a fallback.** Admin has no business membership and is rendered into demo
+1. **Registration forms are visual only.** `/auth/register` and `/products/new` have no submit handlers yet.
+2. **No order, quote, invoice, or payment flows.** Dashboards intentionally show empty states.
+3. **Homepage featured content is static marketing data**, not driven by the database.
+4. **Admin experience is a fallback.** Admin has no business membership and is rendered into demo
    business dashboards via hardcoded IDs.
-7. **Environment drift.** `DATABASE_URL` says port 5432 while the app uses 5433. Hardcoded DB
-   credentials and the dev `NEXTAUTH_SECRET` live in the repo environment files. Rotate and move to
-   secrets management before any shared deployment.
-8. **Prisma is unusable.** Schema drift and client generation failures mean Prisma is reference-only.
-9. **No automated tests or CI.** Verification so far is manual build/curl scripts.
-10. **No file/image handling.** There is no upload pipeline; product visuals are CSS/SVG compositions.
-11. **Turbopack restrictions.** JSX comments and Pages Router APIs must be avoided until the toolchain
-    is normalized.
-12. **Currency/localization inconsistency.** Schema defaults to NPR/NP; seeded data and dashboard
-    display use USD/US.
-13. **Demo credentials are deliberately weak and stored in a seed script.** Development only.
+5. **Demo credentials are deliberately weak and public in the seed script.** Rotate or remove them
+   before a real launch.
+6. **No automated tests or CI.** Verification is manual build and curl smoke tests.
+7. **No file/image handling.** There is no upload pipeline; product visuals are CSS/SVG compositions.
+8. **Turbopack restrictions remain** for dev mode; `npm run dev` therefore uses `--webpack`.
+9. **Currency/localization inconsistency.** Schema defaults to NPR/NP; seeded data and dashboard
+   display use USD/US.
+10. **Preview deployments and NextAuth.** `NEXTAUTH_URL` covers one production URL; preview URLs
+    need separate handling.
 
 ---
 
 ## 14. Recommended Next Steps
 
-1. **Wire registration end to end** (buyer account): validation with zod, bcrypt hashing, user +
-   business + membership + client profile creation, then auto sign-in.
-2. **Fix `app/business/register/route.js`**: App Router `POST`, `import { v4 }`, session-derived user,
-   corrected column list, proper 400/409 responses.
-3. **Protect APIs by default**: enable root middleware and use `middleware/api-protect.js`; scope
-   product queries to the session's `businessId`.
-4. **Product management**: create/edit flows connected to `/products`, variant editor, image support,
-   category picker from the database.
-5. **Orders and quotes**: implement cart/quote request, order creation, status transitions from the
+1. **Wire registration end to end** (buyer account): validation, bcrypt hashing, user + business +
+   membership + client profile creation, then auto sign-in.
+2. **Connect `/products/new`** to the product API, including a variant editor and category picker.
+3. **Orders and quotes**: cart/quote request, order creation, status transitions from the
    OrderStatus enum, invoices, and payment records.
-6. **Admin console**: platform-level supplier verification and buyer management instead of the
+4. **Admin console**: platform-level supplier verification and buyer management instead of the
    demo fallback IDs.
-7. **Test suite**: unit tests for `verifyUser`, API route tests, and Playwright end-to-end tests for
+5. **Test suite**: unit tests for `verifyUser`, API route tests, and Playwright end-to-end tests for
    login → dashboard → product creation.
-8. **Environment cleanup**: single source of truth for database URL/port, remove hardcoded pools,
-   rotate dev secrets.
-9. **Polish**: pagination/search/filtering in dashboards, loading and error states, real product imagery,
-   and consistent currency formatting.
-10. **Deployment preparation**: Docker build, migrations strategy, secrets, logging/monitoring.
+6. **Harden auth**: remove the plaintext-password fallback, add rate limiting, and rotate secrets.
+7. **Polish**: pagination/search/filtering in dashboards, loading and error states, real product
+   imagery, and consistent currency formatting.
+8. **Operational readiness**: managed Postgres backups, logging/monitoring, and a preview-environment
+   auth strategy.
 
 ---
 
@@ -518,8 +508,8 @@ Dashboard content checks:
 | `app/components/login-form.tsx` | Credentials form, quick-fill, role redirect |
 | `app/components/sign-out-button.tsx` | NextAuth sign-out |
 | `app/api/auth/[...nextauth]/route.js` | NextAuth App Router handler |
-| `app/products/route.js` | Product CRUD API |
-| `app/business/register/route.js` | Business registration API (broken) |
+| `app/products/route.js` | Product API (public GET, guarded writes) |
+| `app/business/register/route.js` | Business registration API (session required) |
 | `lib/auth-options.js` | NextAuth options and callbacks |
 | `lib/auth.js` | Password verification and user/tenant helpers |
 | `lib/db.js` | Shared pg pool and query helper |
@@ -528,8 +518,35 @@ Dashboard content checks:
 | `app/globals.css` | Full design system and dashboard styles |
 | `seed-demo-accounts.js` | Demo users, businesses, products, variants |
 | `seed-data.js` | Earlier seed attempt (categories, sample data) |
+| `db/schema.sql` | Schema dump used for cloud/Vercel database setup |
+| `setup-cloud-db.js` | Applies `db/schema.sql` to the configured `DATABASE_URL` |
+| `README.md` | Setup, demo accounts, routes, and Vercel deployment guide |
 
 ---
 
-*Report generated from the working tree and live database on 2026-11-16. All credentials and secrets
-referenced here are development-only.*
+## 16. Vercel Deployment
+
+The repository is ready to import into Vercel. Required steps:
+
+1. Create a hosted Postgres database (Neon, Supabase, or Vercel Postgres) and copy a pooled
+   connection string with `sslmode=require`.
+2. Create the schema and seed data from the local machine:
+
+```bash
+DATABASE_URL="postgres://..." npm run db:cloud
+DATABASE_URL="postgres://..." npm run seed:demo
+```
+
+3. Import `RajeshPuri/b2b` at `vercel.com/new` (Next.js preset is auto-detected).
+4. Set environment variables for Production: `DATABASE_URL`, `NEXTAUTH_SECRET` (`openssl rand -base64 32`),
+   and `NEXTAUTH_URL` (the final `https://` production URL).
+5. Deploy. If the production URL was unknown during the first deploy, add `NEXTAUTH_URL` and redeploy.
+6. Sign in with a demo account, then rotate or remove the public demo credentials.
+
+Local `.env` files are git-ignored; database connections automatically use SSL for non-local hosts.
+The complete guide is in `README.md`.
+
+---
+
+*Report generated from the working tree and live database on 2026-11-16. Updated with deployment
+preparation. All credentials and secrets referenced here are development-only.*

@@ -1,13 +1,25 @@
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 
-const pool = new Pool({
-  host: '127.0.0.1',
-  port: 5433,
-  user: 'b2b_user',
-  password: 'devpass123',
-  database: 'b2b_platform',
-});
+const connectionString = process.env.DATABASE_URL;
+const isLocal = connectionString
+  ? connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+  : true;
+
+const pool = connectionString
+  ? new Pool({
+      connectionString,
+      ssl: isLocal ? undefined : { rejectUnauthorized: false },
+      max: 10,
+    })
+  : new Pool({
+      host: '127.0.0.1',
+      port: 5433,
+      user: 'b2b_user',
+      password: 'devpass123',
+      database: 'b2b_platform',
+      max: 10,
+    });
 
 async function seed() {
   const client = await pool.connect();

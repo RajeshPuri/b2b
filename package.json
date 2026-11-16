@@ -1,35 +1,35 @@
 {
-  "name": "b2b",
+  "name": "b2b-marketplace",
   "version": "1.0.0",
-  "description": "",
+  "description": "B2B wholesale clothing marketplace with Next.js, NextAuth, and PostgreSQL",
   "main": "next.config.js",
+  "engines": {
+    "node": "22.x"
+  },
   "directories": {
     "doc": "docs",
     "lib": "lib"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "seed": "node seed-data.js",
-    "seed:demo": "node seed-demo-accounts.js"
+    "seed": "node --env-file-if-exists=.env.local seed-data.js",
+    "seed:demo": "node --env-file-if-exists=.env.local seed-demo-accounts.js",
+    "db:cloud": "node setup-cloud-db.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@hookform/resolvers": "^7.0.6",
-    "@prisma/client": "^7.10.1",
     "bcryptjs": "^3.0.3",
-    "cross-env": "^10.1.0",
-    "date-fns": "^4.4.0",
     "jsonwebtoken": "^9.0.3",
+    "next": "^16.4.6",
     "next-auth": "^4.24.15",
     "pg": "^8.23.1",
-    "prisma": "^8.0.0-rc.33",
-    "react-hook-form": "^7.92.0",
-    "zod": "^4.6.7"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
