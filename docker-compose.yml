@@ -1,0 +1,71 @@
+version: '3.9'
+
+volumes:
+  postgres_data:
+  redis_data:
+
+services:
+  # Application
+  app:
+    build:
+      context: ./docker/app
+    ports: ["3000:3000"]
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL="postgres://b2b_user:devpass123@postgres:5432/b2b_platform?schema=public"
+      - DIRECT_URL="postgres://b2b_user:devpass123@postgres:5432/b2b_platform?schema=public"
+      - REDIS_URL="redis://redis:6379"
+      - SESSION_SECRET="${SESSION_SECRET}"
+      - NEXTAUTH_URL="http://localhost:3000"
+      - NEXTAUTH_SECRET="${NEXTAUTH_SECRET}"
+      - S3_BUCKET="${S3_BUCKET_DEV}"
+      - S3_REGION="${S3_REGION}"
+      - S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID_DEV}"
+      - S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY_DEV}"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - /app/.next
+    env_file: .env.development
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=b2b_user
+      - POSTGRES_PASSWORD=devpass123
+      - POSTGRES_DB=b2b_platform
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init:/docker-entrypoint-initdb.d
+    ports: ["5433:5432"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "b2b_user", "-d", "b2b_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Cache/Queue
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    ports: ["6380:6379"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

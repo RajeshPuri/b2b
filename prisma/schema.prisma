@@ -1,0 +1,442 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ========== IDENTITY TABLES ==========
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  passwordHash String
+  name      String?
+  emailVerified DateTime?
+  image     String?
+  status    Enum {ACTIVE, SUSPENDED, DELETED} @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Session {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  ipAddress     String?
+  userAgent     String?
+}
+
+model VerificationToken {
+  id        String   @id @default(uuid())
+  identifier String   // email or username
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// ========== BUSINESS TABLES ==========
+
+enum BusinessType {
+  WHOLESALER
+  CLIENT
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+model Business {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  type          BusinessType
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  currency      String   @default("NPR")
+  country       String   @default("NP")
+  status        Enum {ACTIVE, SUSPENDED, ARCHIVED} @default(ACTIVE)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  suspendedAt   DateTime?
+  suspendedBy   String?   // User ID
+
+  // Relationships
+  businessMemberships BusinessMembership[]
+  invoices            Invoice[]
+  orders              Order[]
+  paymentsReceived    Payment[]  // payments received from clients
+  paymentsSent        Payment[]  // payments made to suppliers (if client)
+}
+
+model BusinessMembership {
+  id            String   @id @default(uuid())
+  user          User     @relation(fields: [userId], references: [id])
+  userId        String
+  business      Business @relation(fields: [businessId], references: [id])
+  businessId    String
+  role          Enum {OWNER, MANAGER, ACCOUNTANT, SALES, INVENTORY, VIEWER}
+  permissionOverrides Json?   // override specific permissions
+  invitedBy     String?   // User ID who invited
+  invitedAt     DateTime @default(now())
+  joinedAt      DateTime @default(now())
+  leftAt        DateTime?
+  status        Enum {ACTIVE, PENDING, REJECTED, EXPELLED} @default(ACTIVE)
+}
+
+// ========== PROFILE TABLES ==========
+
+model WholesalerProfile {
+  id             String   @id @default(uuid()) @unique
+  business       Business @relation(fields: [businessId], references: [id])
+  businessId     String
+  cinNumber      String
+  panNumber      String
+  bankAccountName String
+  bankAccountNumber String
+  bankName       String
+  bankBranch     String
+  ifscCode       String
+  approvedLimit  Decimal  @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model ClientProfile {
+  id              String   @id @default(uuid()) @unique
+  business        Business @relation(fields: [businessId], references: [id])
+  businessId      String
+  companyGSTNumber String
+  panNumber       String
+  contactPersonName String
+  contactPersonTitle String
+  annualPurchaseVolume Decimal @default(0)
+  creditLimit     Decimal @default(0)
+  paymentTerms    Enum {NET_7, NET_15, NET_30, NET_60, COD} @default("NET_30")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ========== PRODUCT TABLES (basic - Milestone 3) ==========
+
+enum ProductStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String @unique
+  parentId    String?  // self-referencing for subcategories
+  description String?
+  isActive    Boolean  @default(true)
+  sortOrder   Integer  @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Product {
+  id              String   @id @default(uuid())
+  businessId      String   // FK to Business (wholesaler)
+  categoryId      String   // FK to Category
+  name            String
+  slug            String @unique
+  sku             String?  // per business
+  description     String?
+  brand           String?
+  fabricMaterial  String?
+  productStatus   ProductStatus @default(ACTIVE)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  category        Category @relation(fields: [categoryId], references: [id])
+  productVariants ProductVariant[]
+  productImages   ProductImage[]
+}
+
+model ProductVariant {
+  id               String   @id @default(uuid())
+  productId        String   // FK to Product
+  productBusiness  String   // denormalized: businessId from Product
+  sku              String?
+  size             String?
+  color            String?
+  costPrice        Decimal  // Private to wholesaler, NOT visible to clients
+  b2bSellingPrice  Decimal  // Visible to eligible clients
+  mrp              Decimal  // Maximum Retail Price, visible to clients
+  discount         Decimal  @default(0)  // Percentage 0-100
+  minOrderQuantity Integer  @default(1)
+  bulkPricing      Json?    // e.g., [{quantity: 10, price: 9.99}]
+  inventoryTracked Boolean  @default(true)
+  productStatus    ProductStatus @default(ACTIVE)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relationships
+  product          Product  @relation(fields: [productId], references: [id])
+  inventory        Inventory?
+}
+
+model ProductImage {
+  id               String   @id @default(uuid())
+  productVariantId String?  // FK to ProductVariant (optional, for variant-specific images)
+  productId        String   // FK to Product
+  productBusiness  String   // denormalized
+  s3Key            String   // S3 key for the stored image
+  s3Url            String?  // Presigned URL or derived URL
+  isMain           Boolean  @default(false)
+  sortOrder        Integer  @default(0)
+  altText          String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relationships
+  productVariant   ProductVariant?
+  product          Product  @relation(fields: [productId], references: [id])
+}
+
+// ========== INVENTORY TABLES (basic) ==========
+
+model Inventory {
+  id               String   @id @default(uuid())
+  productVariantId String   // FK to ProductVariant; unique
+  productBusiness  String   // denormalized
+  totalQuantity    Integer  @default(0)
+  availableQuantity Integer @default(0)
+  reservedQuantity   Integer @default(0)
+  inStockQuantity   Integer @default(0)
+  lowStockAlertThreshold Integer @default(10)
+  damageQuantity     Integer @default(0)
+  returnQuantity     Integer @default(0)
+  lastStockTake      DateTime?
+  lastUpdated        DateTime @default(now()) @updatedAt
+  createdAt          DateTime @default(now())
+
+  // Relationships
+  productVariant  ProductVariant @relation(fields: [productVariantId], references: [id])
+}
+
+// ========== ORDER TABLES (basic - Milestone 5) ==========
+
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  PROCESSING
+  READY_FOR_DISPATCH
+  DISPATCHED
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  RETURNED
+}
+
+enum PaymentArrangement {
+  ONLINE
+  MANUAL
+  CREDIT
+}
+
+model Order {
+  id               String   @id @default(uuid())
+  sellerBusiness   Business @relation(fields: [sellerBusinessId], references: [id])
+  sellerBusinessId String
+  clientBusiness   Business @relation(fields: [clientBusinessId], references: [id])
+  clientBusinessId String
+  status           OrderStatus @default(PENDING)
+  paymentStatus    PaymentArrangement @default(ONLINE)
+  discountAmount   Decimal  @default(0)
+  taxAmount        Decimal  @default(0)
+  deliveryCharges  Decimal  @default(0)
+  totalAmount      Decimal
+  currency         String   @default("NPR")
+  clientPoNumber   String?
+  deliveredAt      DateTime?
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  cancelledBy      String?  // User ID
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relationships
+  orderItems       OrderItem[]
+  orderStatusHistory OrderStatusHistory[]
+  shipment         Shipment?
+  invoices         Invoice[]
+}
+
+model OrderItem {
+  id               String   @id @default(uuid())
+  orderId          String   // FK to Order
+  productVariantId String   // FK to ProductVariant
+  productSnapshot  Json     // Snapshot of product info at order time
+  quantity         Integer
+  unitPrice        Decimal
+  totalPrice       Decimal  // unitPrice * quantity
+  discount         Decimal  @default(0)
+  moqMet           Boolean  @default(false)
+
+  // Relationships
+  order            Order    @relation(fields: [orderId], references: [id])
+  productVariant   ProductVariant @relation(fields: [productVariantId], references: [id])
+}
+
+model OrderStatusHistory {
+  id               String   @id @default(uuid())
+  orderId          String   // FK to Order
+  fromStatus       OrderStatus
+  toStatus         OrderStatus
+  changedBy        String?  // User ID
+  changedAt        DateTime @default(now())
+  notes            String?
+
+  // Relationships
+  order            Order    @relation(fields: [orderId], references: [id])
+}
+
+// ========== INVOICE TABLES (basic - Milestone 6) ==========
+
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+  CREATED
+}
+
+model Invoice {
+  id               String   @id @default(uuid())
+  sellerBusiness   Business @relation(fields: [sellerBusinessId], references: [id])
+  sellerBusinessId String
+  clientBusiness   Business @relation(fields: [clientBusinessId], references: [id])
+  clientBusinessId String
+  invoiceNumber    String   // Unique seller-specific numbering
+  fiscalYear       String   // e.g., "FY2024"
+  status           InvoiceStatus @default(UNPAID)
+  discountAmount   Decimal  @default(0)
+  taxAmount        Decimal  @default(0)
+  deliveryCharges  Decimal  @default(0)
+  totalAmount      Decimal
+  currency         String   @default("NPR")
+  dueDate          DateTime
+  issuedAt         DateTime @default(now())
+  paidAt           DateTime?
+  cancelledAt      DateTime?
+
+  // Relationships
+  invoiceItems     InvoiceItem[]
+  payments         Payment[]
+}
+
+// ========== PAYMENT TABLES (basic - Milestone 6) ==========
+
+model Payment {
+  id               String   @id @default(uuid())
+  businessIdPayer  String   // Client business who paid
+  sellerBusiness   Business @relation(fields: [sellerBusinessId], references: [id])
+  sellerBusinessId String
+  invoiceId        String?  // FK to Invoice (optional)
+  orderId          String?  // FK to Order (optional)
+  amount           Decimal
+  currency         String   @default("NPR")
+  paymentArrangement PaymentArrangement
+  status           Enum {PENDING, COMPLETED, FAILED, REFUNDED, PARTIALLY_APPLIED} @default(PENDING)
+  gatewayReference String?  // Payment gateway transaction ID
+  proofUrl         String?  // For manual payments: proof upload URL
+  verifiedAt       DateTime?
+  verifiedBy       String?  // User ID who verified
+  transactionId    String?  // Unique transaction identifier
+  idempotencyKey   String   @unique?  // For duplicate prevention
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ========== LEDGER / ACCOUNTING TABLES (basic) ==========
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  REVENUE
+  EXPENSE
+  EQUITY
+  TAX
+}
+
+model LedgerAccount {
+  id             String   @id @default(uuid())
+  businessId     String   // FK to Business
+  name           String
+  code           String?  // e.g., "AR", "AP", "SR"
+  accountType    AccountType
+  balance        Decimal  @default(0)
+  currency       String   @default("NPR")
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model JournalEntry {
+  id               String   @id @default(uuid())
+  businessId       String   // FK to Business
+  entryDate        DateTime
+  description      String
+  referenceType    Enum {INVOICE, PAYMENT, CREDIT_NOTE, ADJUSTMENT, REVERSAL}
+  referenceId      String?  // FK to referencing record
+  status           Enum {POSTED, REVERSED, DRAFT} @default(POSTED)
+  createdAt        DateTime @default(now())
+  createdBy        String?  // User ID
+
+  // Relationships
+  journalLines     JournalLine[]
+}
+
+model JournalLine {
+  id               String   @id @default(uuid())
+  journalEntryId   String   // FK to JournalEntry
+  accountId        String   // FK to LedgerAccount
+  debit            Decimal  @default(0)
+  credit           Decimal  @default(0)
+  description      String?
+  sortOrder        Integer  @default(0)
+
+  // Relationships
+  journalEntry     JournalEntry @relation(fields: [journalEntryId], references: [id])
+  ledgerAccount    LedgerAccount @relation(fields: [accountId], references: [id])
+}
+
+// ========== NOTIFICATIONS & AUDIT ==========
+
+model Notification {
+  id               String   @id @default(uuid())
+  userBusiness     BusinessMembership @relation(fields: [userBusinessId], references: [id])
+  userBusinessId   String
+  type             Enum {INVOICE, ORDER, QUOTATION, PAYMENT, SYSTEM, LOW_STOCK}
+  title            String
+  message          String
+  data             Json?    // Additional data
+  isRead           Boolean  @default(false)
+  readAt           DateTime?
+  createdAt        DateTime @default(now())
+}
+
+model AuditLog {
+  id               String   @id @default(uuid())
+  businessId       String?  // FK to Business (null = platform-level)
+  userId           String?  // FK to User (null = system/admin)
+  action           Enum {CREATE, UPDATE, DELETE, STATUS_CHANGE, PERMISSION_CHANGE, LOGIN, LOGOUT, SUSPEND, ACTIVATE}
+  entityType       String   // e.g., "Product", "Invoice", "User", "Payment"
+  entityId         String
+  changes          Json     // before/after or change summary
+  ipAddress        String?
+  userAgent        String?
+  createdAt        DateTime @default(now())
+}
+EOF
