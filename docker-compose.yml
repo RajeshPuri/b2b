@@ -8,7 +8,8 @@ services:
   # Application
   app:
     build:
-      context: ./docker/app
+      context: .
+      dockerfile: docker/app/Dockerfile.dev
     ports: ["3000:3000"]
     environment:
       - NODE_ENV=development
